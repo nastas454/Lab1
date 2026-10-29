@@ -16,7 +16,15 @@ DATABASE_URL = os.getenv(
     f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_size=POOL_SIZE,
+    max_overflow=0
+)
+
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
