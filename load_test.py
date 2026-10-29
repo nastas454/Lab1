@@ -1,106 +1,128 @@
 import time
+import asyncio
+import aiohttp
 import random
-import requests
-import multiprocessing
-from concurrent.futures import ThreadPoolExecutor
-import argparse
+import sys
 
-WARMUP_SEC = 10
-RUN_SEC = 30
-TOTAL_SEC = WARMUP_SEC + RUN_SEC
 URL_TEMPLATE = "http://localhost/dispensary/{}"
+TIMEOUT = 5.0
 
-def fetch(expected_start, valid_ids):
-    record_id = random.choice(valid_ids)
+async def fetch(session, expected_start, record_id):
+    now = time.time()
+    if expected_start > now:
+        await asyncio.sleep(expected_start - now)
     actual_start = time.time()
+    status = 0
     try:
-        r = requests.get(URL_TEMPLATE.format(record_id), timeout=5.0)
-        status = r.status_code
+        async with session.get(URL_TEMPLATE.format(record_id), timeout=TIMEOUT) as response:
+            status = response.status
+    except asyncio.TimeoutError:
+        status = 408
     except Exception:
         status = 0
     actual_end = time.time()
-    return (expected_start, actual_start, actual_end, status)
+    return expected_start, actual_start, actual_end, status
 
-def worker(args):
-    target_rps_per_worker, valid_ids = args
-    total_requests = target_rps_per_worker * TOTAL_SEC
-    interval = 1.0 / target_rps_per_worker
-    results = []
-    with ThreadPoolExecutor(max_workers=target_rps_per_worker * 2) as executor:
-        futures = []
-        base_time = time.time()
-        for i in range(total_requests):
-            expected_start = base_time + i * interval
-            now = time.time()
-            if expected_start > now:
-                time.sleep(expected_start - now)
-            futures.append(executor.submit(fetch, expected_start, valid_ids))
-        for f in futures:
-            results.append(f.result())
-    return results
+async def run_step(session, target_rps, duration, valid_ids, step_name):
+    total_requests = target_rps * duration
+    interval = 1.0 / target_rps
 
-def main(total_rps):
+    print(f"\n{'=' * 80}")
+    print(f"Етап: {step_name} | Задана інтенсивність: {target_rps} RPS | Тривалість: {duration} с")
+    print(f"{'=' * 80}")
+    print("Секунда | Задано | Відправлено | Досягнуто(2xx) | Не 2xx | Помилки з'єдн. | p50 (ms) | p95 (ms) | p99 (ms)")
+
+    tasks = []
+    base_time = time.time()
+    for i in range(total_requests):
+        expected_start = base_time + i * interval
+        record_id = random.choice(valid_ids)
+        tasks.append(asyncio.create_task(fetch(session, expected_start, record_id)))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    per_second_stats = {
+        i: {"expected": target_rps, "actual_sent": 0, "2xx": 0, "non_2xx": 0, "conn_err": 0, "latencies": []} for i in
+        range(duration)}
+
+    for res in results:
+        if isinstance(res, Exception):
+            continue
+        expected_start, actual_start, actual_end, status = res
+        sec_sent = int(actual_start - base_time)
+        sec_completed = int(actual_end - base_time)
+        if 0 <= sec_sent < duration:
+            per_second_stats[sec_sent]["actual_sent"] += 1
+        if 0 <= sec_completed < duration:
+            if 200 <= status < 300:
+                per_second_stats[sec_completed]["2xx"] += 1
+                latency_ms = (actual_end - expected_start) * 1000
+                per_second_stats[sec_completed]["latencies"].append(latency_ms)
+            elif status == 0:
+                per_second_stats[sec_completed]["conn_err"] += 1
+            else:
+                per_second_stats[sec_completed]["non_2xx"] += 1
+    step_achieved_rps_list = []
+
+    for sec in range(duration):
+        st = per_second_stats[sec]
+        lats = sorted(st["latencies"])
+        p50 = lats[int(len(lats) * 0.50)] if lats else 0
+        p95 = lats[int(len(lats) * 0.95)] if lats else 0
+        p99 = lats[int(len(lats) * 0.99)] if lats else 0
+        print(
+            f"{sec + 1:7d} | {st['expected']:6d} | {st['actual_sent']:11d} | {st['2xx']:14d} | {st['non_2xx']:6d} | {st['conn_err']:14d} | {p50:8.1f} | {p95:8.1f} | {p99:8.1f}")
+        if step_name != "Прогрів" and sec >= 5:
+            step_achieved_rps_list.append(st['2xx'])
+
+    avg_achieved = sum(step_achieved_rps_list) / len(step_achieved_rps_list) if step_achieved_rps_list else 0
+    if step_name != "Прогрів":
+        print(
+            f"-> Середня досягнута інтенсивність на сходинці: {avg_achieved:.2f} RPS (Поріг 90%: {0.9 * target_rps:.2f} RPS)")
+    return avg_achieved
+
+def silence_winerror_10054(loop, context):
+    exc = context.get('exception')
+    if isinstance(exc, ConnectionResetError) or (isinstance(exc, OSError) and exc.errno == 10054):
+        return
+    loop.default_exception_handler(context)
+
+async def main():
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(silence_winerror_10054)
     try:
         with open("ids.txt", "r") as f:
             valid_ids = [line.strip() for line in f if line.strip()]
     except FileNotFoundError:
         print("Файл ids.txt не знайдено. Спочатку запустіть populate.py")
         return
-    cores = multiprocessing.cpu_count()
-    if cores > total_rps:
-        cores = total_rps
-    rps_per_worker = total_rps // cores
-    actual_total_rps = rps_per_worker * cores
 
-    print(f"Запуск: {actual_total_rps} RPS ({rps_per_worker} RPS на кожен з {cores} процесів)")
+    connector = aiohttp.TCPConnector(limit=0)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        await run_step(session, target_rps=200, duration=10, valid_ids=valid_ids, step_name="Прогрів")
 
-    with multiprocessing.Pool(cores) as pool:
-        results = pool.map(worker, [(rps_per_worker, valid_ids)] * cores)
+        current_rps = 200
+        consecutive_fails = 0
+        while True:
+            avg_achieved = await run_step(session, target_rps=current_rps, duration=20, valid_ids=valid_ids,
+                                          step_name=f"Сходинка {current_rps} RPS")
 
-    flat_results = [item for sublist in results for item in sublist]
-    min_expected = min(r[0] for r in flat_results)
-    valid_results = [r for r in flat_results if r[0] >= min_expected + WARMUP_SEC]
-    total_valid = len(valid_results)
-    if total_valid == 0:
-        print("Немає успішних запитів після прогріву.")
-        return
+            if avg_achieved < 0.9 * current_rps:
+                consecutive_fails += 1
+                print(f"[!] УВАГА: Сервер не справляється (Спроба {consecutive_fails}/2).")
+            else:
+                consecutive_fails = 0
 
-    latencies = []
-    errors = 0
-    sum_time_in_system = 0.0
-    for req in valid_results:
-        exp_start, act_start, act_end, status = req
-        if 200 <= status < 300:
-            latency = act_end - act_start
-            latencies.append(latency)
-            sum_time_in_system += (act_end - exp_start)
-        else:
-            errors += 1
-    if not latencies:
-        print("Жоден запит не був успішним.")
-        return
-
-    latencies.sort()
-    p50 = latencies[int(len(latencies) * 0.50)] * 1000
-    p95 = latencies[int(len(latencies) * 0.95)] * 1000
-    p99 = latencies[int(len(latencies) * 0.99)] * 1000
-    achieved_rps = len(latencies) / RUN_SEC
-    error_rate = (errors / total_valid) * 100
-    avg_l = sum_time_in_system / RUN_SEC
-    avg_w = (sum(latencies) / len(latencies))
-
-    print("-" * 30)
-    print(f"Задана інтенсивність: {actual_total_rps} RPS")
-    print(f"Досягнута інтенсивність: {achieved_rps:.2f} RPS")
-    print(f"p50: {p50:.2f} ms")
-    print(f"p95: {p95:.2f} ms")
-    print(f"p99: {p99:.2f} ms")
-    print(f"Помилки (не 2xx): {error_rate:.2f}%")
-    print(f"Для Літтла (100 RPS): λ={achieved_rps:.2f}, W={avg_w:.4f}s, Виміряне L={avg_l:.2f}")
-    print("-" * 30)
+            if consecutive_fails >= 2:
+                print(
+                    "\n[!] ТЕСТ ЗУПИНЕНО: На двох сходинках поспіль досягнута інтенсивність нижча за 0.9 від заданої.")
+                break
+            current_rps += 200
+    await asyncio.sleep(0.250)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rps", type=int, required=True)
-    args = parser.parse_args()
-    main(args.rps)
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nТест перервано користувачем.")

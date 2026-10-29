@@ -13,6 +13,7 @@ services:
       timeout: 3s
       retries: 5
 
+
   migrator:
     build: .
     command: python migrate.py
@@ -35,6 +36,7 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${DB_NAME}
+      DB_POOL_SIZE: 10
     depends_on:
       db:
         condition: service_healthy
@@ -55,5 +57,25 @@ services:
     depends_on:
       - web
 
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    depends_on:
+      - web
+      - postgres-exporter
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  prom_data:

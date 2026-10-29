@@ -5,3 +5,4 @@ asyncpg
 python-dotenv
 pydantic
 greenlet
+prometheus-client==0.20.0
