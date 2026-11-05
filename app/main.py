@@ -32,7 +32,7 @@ REQUEST_DURATION = Histogram(
 REQUESTS_IN_PROGRESS = Gauge(
     "http_requests_in_progress",
     "Number of HTTP requests currently being processed",
-    ["method", "path"]
+    ["method"]
 )
 
 @asynccontextmanager
@@ -41,20 +41,11 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 app = FastAPI(lifespan=lifespan)
 
-
-# --- 3. Проміжний обробник (middleware) для метрик та X-Pod ---
 @app.middleware("http")
 async def prometheus_metrics_middleware(request: Request, call_next):
     method = request.method
-
-    # Визначаємо шаблон шляху (наприклад, /dispensary/{id} замість /dispensary/123)[cite: 8]
-    path_template = request.url.path
-    if "route" in request.scope:
-        path_template = request.scope["route"].path
-
-    REQUESTS_IN_PROGRESS.labels(method=method, path=path_template).inc()
+    REQUESTS_IN_PROGRESS.labels(method=method).inc()
     start_time = time.time()
-
     try:
         response = await call_next(request)
         status_code = str(response.status_code)
@@ -63,13 +54,14 @@ async def prometheus_metrics_middleware(request: Request, call_next):
         status_code = "500"
         raise e
     finally:
+        path_template = request.url.path
+        if "route" in request.scope:
+            path_template = request.scope["route"].path
         duration = time.time() - start_time
         REQUEST_DURATION.labels(method=method, path=path_template).observe(duration)
         REQUEST_COUNTER.labels(method=method, path=path_template, code=status_code).inc()
-        REQUESTS_IN_PROGRESS.labels(method=method, path=path_template).dec()
-
+        REQUESTS_IN_PROGRESS.labels(method=method).dec()
     return response
-
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -78,17 +70,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": str(exc.errors())}
     )
 
-
-# --- 4. Ендпоінти для метрик та healthcheck ---
 @app.get("/metrics")
 def get_metrics():
     return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-
 @app.get("/livez", status_code=status.HTTP_200_OK)
 def livez():
     return {"status": "ok"}
-
 
 @app.get("/healthz", status_code=status.HTTP_200_OK)
 async def healthcheck(db: AsyncSession = Depends(get_db)):
@@ -98,8 +86,6 @@ async def healthcheck(db: AsyncSession = Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=503, detail="DB unavailable")
 
-
-# --- 5. Ваші бізнес-ендпоінти (CRUD) ---
 @app.post("/dispensary", response_model=DispensaryOut, status_code=status.HTTP_201_CREATED)
 async def create_record(record: DispensaryCreate, db: AsyncSession = Depends(get_db)):
     db_record = DispensaryRecord(**record.model_dump())
@@ -107,7 +93,6 @@ async def create_record(record: DispensaryCreate, db: AsyncSession = Depends(get
     await db.commit()
     await db.refresh(db_record)
     return db_record
-
 
 @app.get("/dispensary", response_model=DispensaryListOut)
 async def get_records(
@@ -125,14 +110,12 @@ async def get_records(
     result = await db.execute(query)
     return {"items": result.scalars().all(), "total": total}
 
-
 @app.get("/dispensary/{id}", response_model=DispensaryOut)
 async def get_record(id: UUID, db: AsyncSession = Depends(get_db)):
     record = await db.scalar(select(DispensaryRecord).where(DispensaryRecord.id == id))
     if not record:
         raise HTTPException(status_code=404, detail="Not found")
     return record
-
 
 @app.put("/dispensary/{id}", response_model=DispensaryOut)
 async def update_record(id: UUID, record_in: DispensaryCreate, db: AsyncSession = Depends(get_db)):
@@ -144,7 +127,6 @@ async def update_record(id: UUID, record_in: DispensaryCreate, db: AsyncSession 
     await db.commit()
     await db.refresh(db_record)
     return db_record
-
 
 @app.delete("/dispensary/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_record(id: UUID, db: AsyncSession = Depends(get_db)):
