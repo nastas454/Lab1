@@ -1,7 +1,7 @@
 import requests
 import datetime
 
-url = "http://localhost/dispensary"
+url = "http://localhost:8080/dispensary"
 created_ids = []
 
 for i in range(1, 101):

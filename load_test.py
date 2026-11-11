@@ -4,26 +4,10 @@ import aiohttp
 import random
 import sys
 
-URL_TEMPLATE = "http://localhost/dispensary/{}"
+URL_TEMPLATE = "http://localhost:8080/dispensary/{}"
 TIMEOUT = 5.0
 
-async def fetch(session, expected_start, record_id):
-    now = time.time()
-    if expected_start > now:
-        await asyncio.sleep(expected_start - now)
-    actual_start = time.time()
-    status = 0
-    try:
-        async with session.get(URL_TEMPLATE.format(record_id), timeout=TIMEOUT) as response:
-            status = response.status
-    except asyncio.TimeoutError:
-        status = 408
-    except Exception:
-        status = 0
-    actual_end = time.time()
-    return expected_start, actual_start, actual_end, status
-
-async def run_step(session, target_rps, duration, valid_ids, step_name):
+async def run_step(target_rps, duration, valid_ids, step_name):
     total_requests = target_rps * duration
     interval = 1.0 / target_rps
 
@@ -32,26 +16,74 @@ async def run_step(session, target_rps, duration, valid_ids, step_name):
     print(f"{'=' * 80}")
     print("Секунда | Задано | Відправлено | Досягнуто(2xx) | Не 2xx | Помилки з'єдн. | p50 (ms) | p95 (ms) | p99 (ms)")
 
-    tasks = []
+    queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    results = []
+
+    async def worker():
+        while not stop_event.is_set():
+            connector = aiohttp.TCPConnector(limit=1)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                for _ in range(100):
+                    if stop_event.is_set():
+                        break
+
+                    try:
+                        expected_start = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    record_id = random.choice(valid_ids)
+                    actual_start = time.time()
+                    status = 0
+
+                    try:
+                        async with session.get(URL_TEMPLATE.format(record_id), timeout=TIMEOUT) as response:
+                            await response.read()
+                            status = response.status
+                    except asyncio.TimeoutError:
+                        status = 408
+                    except Exception:
+                        status = 0
+
+                    actual_end = time.time()
+                    results.append((expected_start, actual_start, actual_end, status))
+                    queue.task_done()
+
+    num_connections = 8 * target_rps
+    workers = [asyncio.create_task(worker()) for _ in range(num_connections)]
+
     base_time = time.time()
+
     for i in range(total_requests):
         expected_start = base_time + i * interval
-        record_id = random.choice(valid_ids)
-        tasks.append(asyncio.create_task(fetch(session, expected_start, record_id)))
+        now = time.time()
+        if expected_start > now:
+            await asyncio.sleep(expected_start - now)
+        queue.put_nowait(expected_start)
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    time_to_wait = duration - (time.time() - base_time)
+    if time_to_wait > 0:
+        await asyncio.sleep(time_to_wait)
+
+    stop_event.set()
+    for w in workers:
+        w.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
+
     per_second_stats = {
-        i: {"expected": target_rps, "actual_sent": 0, "2xx": 0, "non_2xx": 0, "conn_err": 0, "latencies": []} for i in
-        range(duration)}
+        i: {"expected": target_rps, "actual_sent": 0, "2xx": 0, "non_2xx": 0, "conn_err": 0, "latencies": []}
+        for i in range(duration)
+    }
 
     for res in results:
-        if isinstance(res, Exception):
-            continue
         expected_start, actual_start, actual_end, status = res
         sec_sent = int(actual_start - base_time)
         sec_completed = int(actual_end - base_time)
+
         if 0 <= sec_sent < duration:
             per_second_stats[sec_sent]["actual_sent"] += 1
+
         if 0 <= sec_completed < duration:
             if 200 <= status < 300:
                 per_second_stats[sec_completed]["2xx"] += 1
@@ -61,6 +93,7 @@ async def run_step(session, target_rps, duration, valid_ids, step_name):
                 per_second_stats[sec_completed]["conn_err"] += 1
             else:
                 per_second_stats[sec_completed]["non_2xx"] += 1
+
     step_achieved_rps_list = []
 
     for sec in range(duration):
@@ -71,13 +104,15 @@ async def run_step(session, target_rps, duration, valid_ids, step_name):
         p99 = lats[int(len(lats) * 0.99)] if lats else 0
         print(
             f"{sec + 1:7d} | {st['expected']:6d} | {st['actual_sent']:11d} | {st['2xx']:14d} | {st['non_2xx']:6d} | {st['conn_err']:14d} | {p50:8.1f} | {p95:8.1f} | {p99:8.1f}")
-        if step_name != "Прогрів" and sec >= 5:
+
+        if step_name != "Прогрів" and sec >= (duration - 20):
             step_achieved_rps_list.append(st['2xx'])
 
     avg_achieved = sum(step_achieved_rps_list) / len(step_achieved_rps_list) if step_achieved_rps_list else 0
     if step_name != "Прогрів":
         print(
-            f"-> Середня досягнута інтенсивність на сходинці: {avg_achieved:.2f} RPS (Поріг 90%: {0.9 * target_rps:.2f} RPS)")
+            f"-> Середня досягнута інтенсивність на сходинці (останні 20с): {avg_achieved:.2f} RPS (Поріг 90%: {0.9 * target_rps:.2f} RPS)")
+
     return avg_achieved
 
 def silence_winerror_10054(loop, context):
@@ -86,9 +121,11 @@ def silence_winerror_10054(loop, context):
         return
     loop.default_exception_handler(context)
 
+
 async def main():
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(silence_winerror_10054)
+
     try:
         with open("ids.txt", "r") as f:
             valid_ids = [line.strip() for line in f if line.strip()]
@@ -96,27 +133,31 @@ async def main():
         print("Файл ids.txt не знайдено. Спочатку запустіть populate.py")
         return
 
-    connector = aiohttp.TCPConnector(limit=0)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        await run_step(session, target_rps=200, duration=10, valid_ids=valid_ids, step_name="Прогрів")
+    await run_step(target_rps=200, duration=10, valid_ids=valid_ids, step_name="Прогрів")
 
-        current_rps = 200
-        consecutive_fails = 0
-        while True:
-            avg_achieved = await run_step(session, target_rps=current_rps, duration=20, valid_ids=valid_ids,
-                                          step_name=f"Сходинка {current_rps} RPS")
+    current_rps = 200
+    consecutive_fails = 0
 
-            if avg_achieved < 0.9 * current_rps:
-                consecutive_fails += 1
-                print(f"[!] УВАГА: Сервер не справляється (Спроба {consecutive_fails}/2).")
-            else:
-                consecutive_fails = 0
+    while True:
+        avg_achieved = await run_step(
+            target_rps=current_rps,
+            duration=30,
+            valid_ids=valid_ids,
+            step_name=f"Сходинка {current_rps} RPS"
+        )
 
-            if consecutive_fails >= 2:
-                print(
-                    "\n[!] ТЕСТ ЗУПИНЕНО: На двох сходинках поспіль досягнута інтенсивність нижча за 0.9 від заданої.")
-                break
-            current_rps += 200
+        if avg_achieved < 0.9 * current_rps:
+            consecutive_fails += 1
+            print(f"[!] УВАГА: Сервер не справляється (Спроба {consecutive_fails}/2).")
+        else:
+            consecutive_fails = 0
+
+        if consecutive_fails >= 2:
+            print("\n[!] ТЕСТ ЗУПИНЕНО: На двох сходинках поспіль досягнута інтенсивність нижча за 0.9 від заданої.")
+            break
+
+        current_rps += 200
+
     await asyncio.sleep(0.250)
 
 if __name__ == "__main__":

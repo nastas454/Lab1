@@ -1,0 +1,18 @@
+# Однакова toleration для всіх компонентів, що прив'язані до вузла role=infra (control-plane має taint NoSchedule)
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 5s
+    serviceMonitorSelectorNilUsesHelmValues: false
+    nodeSelector: { role: infra }
+    tolerations: &tol
+      - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+alertmanager:
+  enabled: false           # не потрібен у роботі; менше навантаження на машину
+grafana:
+  enabled: false           # так само (у вас Grafana їла 449Mi)
+prometheusOperator:
+  nodeSelector: { role: infra }
+  tolerations: *tol
+kube-state-metrics:
+  nodeSelector: { role: infra }
+  tolerations: *tol

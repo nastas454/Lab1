@@ -1,0 +1,16 @@
+# Пароль береться з наявного Secret db-secret, а не з командного рядка
+config:
+  datasource:
+    host: db
+    user: postgres            # те саме значення, що DB_USER у .env
+    database: dispensary_db
+    passwordSecret:
+      name: db-secret
+      key: DB_PASSWORD
+nodeSelector: { role: infra }
+tolerations:
+  - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+serviceMonitor:
+  enabled: true
+  interval: 5s
+  labels: { release: prometheus }

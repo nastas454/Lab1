@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+data:
+  DB_HOST: "db"
+  DB_PORT: "5432"
+  DB_POOL_SIZE: "10"

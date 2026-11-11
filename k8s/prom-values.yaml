@@ -1,0 +1,19 @@
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 5s
+    nodeSelector:
+      role: infra
+    serviceMonitorSelectorNilUsesHelmValues: false
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      role: infra
+grafana:
+  nodeSelector:
+    role: infra
+prometheusOperator:
+  nodeSelector:
+    role: infra
+kube-state-metrics:
+  nodeSelector:
+    role: infra
