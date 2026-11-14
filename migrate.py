@@ -1,5 +1,6 @@
 import asyncio
 from app.database import engine, Base
+import app.models
 
 async def migrate():
     async with engine.begin() as conn:

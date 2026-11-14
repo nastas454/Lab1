@@ -1,8 +1,7 @@
-# Пароль береться з наявного Secret db-secret, а не з командного рядка
 config:
   datasource:
     host: db
-    user: postgres            # те саме значення, що DB_USER у .env
+    user: postgres
     database: dispensary_db
     passwordSecret:
       name: db-secret

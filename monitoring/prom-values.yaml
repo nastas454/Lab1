@@ -1,5 +1,7 @@
-# Однакова toleration для всіх компонентів, що прив'язані до вузла role=infra (control-plane має taint NoSchedule)
 prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090
   prometheusSpec:
     scrapeInterval: 5s
     serviceMonitorSelectorNilUsesHelmValues: false
@@ -7,12 +9,13 @@ prometheus:
     tolerations: &tol
       - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
 alertmanager:
-  enabled: false           # не потрібен у роботі; менше навантаження на машину
+  enabled: false
 grafana:
-  enabled: false           # так само (у вас Grafana їла 449Mi)
+  enabled: false
 prometheusOperator:
   nodeSelector: { role: infra }
   tolerations: *tol
 kube-state-metrics:
   nodeSelector: { role: infra }
   tolerations: *tol
+
