@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+spec:
+  template:
+    spec:
+      nodeSelector:
+        role: infra
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+      - name: migrator
+        image: lab-web:latest
+        imagePullPolicy: Never
+        command: ["python", "migrate.py"]
+        envFrom:
+          - secretRef:
+              name: db-secret
+        env:
+          - name: DB_HOST
+            value: "db"
+          - name: DB_PORT
+            value: "5432"
+      restartPolicy: Never

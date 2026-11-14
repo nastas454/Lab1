@@ -1,0 +1,15 @@
+config:
+  datasource:
+    host: db
+    user: postgres
+    database: dispensary_db
+    passwordSecret:
+      name: db-secret
+      key: DB_PASSWORD
+nodeSelector: { role: infra }
+tolerations:
+  - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+serviceMonitor:
+  enabled: true
+  interval: 5s
+  labels: { release: prometheus }
